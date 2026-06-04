@@ -1,30 +1,36 @@
 """
 Hand Gesture Mouse Controller
-Requiere: pip install mediapipe opencv-python pyautogui numpy
-No necesita TensorFlow directamente - MediaPipe ya incluye los modelos de mano
+Requiere: pip install mediapipe opencv-python-headless pynput numpy
 """
 
 import cv2
 import mediapipe as mp
-import pyautogui
 import numpy as np
 import time
+from pynput.mouse import Button, Controller as MouseController
+from pynput.mouse import Controller
+
+mouse = Controller()
 
 # --- Config ---
-SMOOTHING = 5           # Suavizado del movimiento (más alto = más suave pero más lento)
-CLICK_THRESHOLD = 0.04  # Distancia para detectar click (pulgar-índice)
-SCROLL_THRESHOLD = 0.05 # Distancia para scroll (índice-medio separados)
-DEAD_ZONE = 10          # Pixeles de zona muerta para evitar micro-movimientos
+SMOOTHING = 5
+CLICK_THRESHOLD = 0.04
+DEAD_ZONE = 10
+SCROLL_SPEED = 5
 
-pyautogui.FAILSAFE = False
-pyautogui.PAUSE = 0
+# Obtener resolución de pantalla
+try:
+    import subprocess
+    out = subprocess.check_output("xrandr | grep '*' | awk '{print $1}'", shell=True).decode().strip().split('\n')[0]
+    screen_w, screen_h = map(int, out.split('x'))
+except:
+    screen_w, screen_h = 1920, 1080
+
+print(f"Resolución detectada: {screen_w}x{screen_h}")
 
 mp_hands = mp.solutions.hands
 mp_draw = mp.solutions.drawing_utils
 
-screen_w, screen_h = pyautogui.size()
-
-# Buffer para suavizado
 pos_buffer = []
 prev_x, prev_y = 0, 0
 click_cooldown = 0
@@ -37,17 +43,11 @@ def smooth_position(x, y, buffer, size=SMOOTHING):
     buffer.append((x, y))
     if len(buffer) > size:
         buffer.pop(0)
-    avg_x = int(np.mean([p[0] for p in buffer]))
-    avg_y = int(np.mean([p[1] for p in buffer]))
-    return avg_x, avg_y
+    return int(np.mean([p[0] for p in buffer])), int(np.mean([p[1] for p in buffer]))
 
 def count_fingers_up(lm):
-    """Cuenta dedos extendidos"""
-    tips = [8, 12, 16, 20]  # Índice, Medio, Anular, Meñique
-    fingers = []
-    # Pulgar (eje X)
-    fingers.append(1 if lm[4].x < lm[3].x else 0)
-    # Resto de dedos (eje Y)
+    tips = [8, 12, 16, 20]
+    fingers = [1 if lm[4].x < lm[3].x else 0]
     for tip in tips:
         fingers.append(1 if lm[tip].y < lm[tip - 2].y else 0)
     return fingers
@@ -99,85 +99,75 @@ def main():
                 fingers = count_fingers_up(lm)
                 finger_count = sum(fingers)
 
-                # Posición del índice (tip)
                 ix = int(lm[8].x * w)
                 iy = int(lm[8].y * h)
 
-                # Mapear a pantalla (margen del 15%)
                 margin = 0.15
-                mx = np.interp(lm[8].x, [margin, 1 - margin], [0, screen_w])
-                my = np.interp(lm[8].y, [margin, 1 - margin], [0, screen_h])
-                mx, my = smooth_position(int(mx), int(my), pos_buffer)
+                mx = int(np.interp(lm[8].x, [margin, 1 - margin], [0, screen_w]))
+                my = int(np.interp(lm[8].y, [margin, 1 - margin], [0, screen_h]))
+                mx, my = smooth_position(mx, my, pos_buffer)
 
-                # Distancias clave
                 d_thumb_index = get_distance(lm[4], lm[8])
                 d_index_middle = get_distance(lm[8], lm[12])
-
                 now = time.time()
 
-                # --- GESTOS ---
-
-                # MOVER: solo índice extendido
+                # MOVER
                 if fingers == [0, 1, 0, 0, 0]:
                     dx = abs(mx - prev_x)
                     dy = abs(my - prev_y)
                     if dx > DEAD_ZONE or dy > DEAD_ZONE:
-                        pyautogui.moveTo(mx, my)
+                        mouse.position = (mx, my)
                         prev_x, prev_y = mx, my
                     if dragging:
-                        pyautogui.mouseUp()
+                        mouse.release(Button.left)
                         dragging = False
                     status_text = "Moviendo"
                     color = (0, 255, 0)
 
-                # CLICK IZQUIERDO: pulgar + índice juntos
+                # CLICK IZQUIERDO
                 elif d_thumb_index < CLICK_THRESHOLD and fingers[1] == 1:
                     if now - click_cooldown > 0.4:
-                        pyautogui.click()
+                        mouse.click(Button.left)
                         click_cooldown = now
                     status_text = "Click Izq"
                     color = (0, 200, 255)
 
-                # CLICK DERECHO: índice + medio extendidos y juntos
+                # CLICK DERECHO
                 elif fingers[1] == 1 and fingers[2] == 1 and fingers[3] == 0 and d_index_middle < CLICK_THRESHOLD:
                     if now - click_cooldown > 0.4:
-                        pyautogui.rightClick()
+                        mouse.click(Button.right)
                         click_cooldown = now
                     status_text = "Click Der"
                     color = (0, 100, 255)
 
-                # ARRASTRAR: puño cerrado
+                # ARRASTRAR
                 elif finger_count == 0:
                     if not dragging:
-                        pyautogui.mouseDown()
+                        mouse.press(Button.left)
                         dragging = True
-                    pyautogui.moveTo(mx, my)
+                    mouse.position = (mx, my)
                     prev_x, prev_y = mx, my
                     status_text = "Arrastrando"
                     color = (255, 0, 100)
 
-                # SCROLL: 4 dedos arriba (sin pulgar)
+                # SCROLL
                 elif fingers == [0, 1, 1, 1, 1]:
                     if now - scroll_cooldown > 0.15:
-                        # Mano arriba = scroll up, abajo = scroll down
                         if lm[8].y < 0.4:
-                            pyautogui.scroll(3)
+                            mouse.scroll(0, SCROLL_SPEED)
                         elif lm[8].y > 0.6:
-                            pyautogui.scroll(-3)
+                            mouse.scroll(0, -SCROLL_SPEED)
                         scroll_cooldown = now
                     status_text = "Scroll"
                     color = (255, 200, 0)
 
-                # Soltar arrastre si no es puño
                 else:
                     if dragging:
-                        pyautogui.mouseUp()
+                        mouse.release(Button.left)
                         dragging = False
 
-                # Dibujar punto en índice
                 cv2.circle(frame, (ix, iy), 10, color, -1)
 
-            # UI en pantalla
             cv2.rectangle(frame, (0, 0), (300, 35), (0, 0, 0), -1)
             cv2.putText(frame, f"Estado: {status_text}", (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
@@ -189,7 +179,7 @@ def main():
                 break
 
     if dragging:
-        pyautogui.mouseUp()
+        mouse.release(Button.left)
     cap.release()
     cv2.destroyAllWindows()
     print("Cerrado.")
